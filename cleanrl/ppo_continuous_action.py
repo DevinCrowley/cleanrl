@@ -118,11 +118,11 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs=None, observation_space=None, action_space=None):
-        if envs is not None:
-            observation_space = envs.single_observation_space
-            action_space = envs.single_action_space
-        assert observation_space is not action_space is not None
+    def __init__(self, env):
+        if hasattr(env, 'single_observation_space'): observation_space = env.single_observation_space
+        else: observation_space = env.observation_space
+        if hasattr(env, 'single_action_space'): action_space = env.single_action_space
+        else: action_space = env.action_space
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(observation_space.shape).prod(), 64)),

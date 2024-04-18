@@ -37,8 +37,8 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
-    save_model_at: int = None
-    """when to save a specific checkpint of model into the `runs/{run_name}` folder"""
+    save_model_incr: int = None
+    """How frequently to save a specific checkpoint of model into the `runs/{run_name}` folder"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
@@ -50,8 +50,8 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 2000000
     """total timesteps of the experiments"""
-    # learning_rate: float = 3e-4
-    learning_rate: float = 1e-3
+    learning_rate: float = 3e-4
+    # learning_rate: float = 1e-3
     """the learning rate of the optimizer"""
     # num_envs: int = 1
     num_envs: int = 10
@@ -208,13 +208,13 @@ if __name__ == "__main__":
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     # TRY NOT TO MODIFY: start the game
+    last_checkpoint_step = 0
     global_step = 0
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
-    saved_checkpoint = False
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -343,11 +343,11 @@ if __name__ == "__main__":
         
         writer.add_scalar("train/reward", rewards.mean(), global_step)
 
-        if args.save_model_at and global_step >= args.save_model_at and not saved_checkpoint:
+        if args.save_model and args.save_model_incr and global_step - last_checkpoint_step >= args.save_model_incr:
             model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model_step_{global_step}"
             torch.save(agent.state_dict(), model_path)
+            last_checkpoint_step = global_step
             print(f"model checkpoint saved to {model_path}")
-            saved_checkpoint = True
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

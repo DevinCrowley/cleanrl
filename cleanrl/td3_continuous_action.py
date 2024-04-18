@@ -14,6 +14,9 @@ import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
+from cleanrl_utils.evals.td3_eval import evaluate
+from cleanrl_utils.huggingface import push_to_hub
+
 
 @dataclass
 class Args:
@@ -35,6 +38,8 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
+    save_model_incr: int = None
+    """How frequently to save a specific checkpoint of model into the `runs/{run_name}` folder"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
@@ -45,6 +50,8 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
+    num_envs: int = 1
+    """the number of parallel game environments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
     buffer_size: int = int(1e6)
@@ -100,15 +107,19 @@ class QNetwork(nn.Module):
 class Actor(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        if hasattr(env, 'single_observation_space'): observation_space = env.single_observation_space
+        else: observation_space = env.observation_space
+        if hasattr(env, 'single_action_space'): action_space = env.single_action_space
+        else: action_space = env.action_space
+        self.fc1 = nn.Linear(np.array(observation_space.shape).prod(), 256)
         self.fc2 = nn.Linear(256, 256)
-        self.fc_mu = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.fc_mu = nn.Linear(256, np.prod(action_space.shape))
         # action rescaling
         self.register_buffer(
-            "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
+            "action_scale", torch.tensor((action_space.high - action_space.low) / 2.0, dtype=torch.float32)
         )
         self.register_buffer(
-            "action_bias", torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32)
+            "action_bias", torch.tensor((action_space.high + action_space.low) / 2.0, dtype=torch.float32)
         )
 
     def forward(self, x):
@@ -154,10 +165,19 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
+
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    if device == 'cuda':
+        envs = gym.vector.SyncVectorEnv(
+            [make_env(args.env_id, args.seed, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        )
+    else:
+        envs = gym.vector.AsyncVectorEnv(
+            [make_env(args.env_id, args.seed, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        )
+    # envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     actor = Actor(envs).to(device)
@@ -183,6 +203,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
+    last_checkpoint_step = 0
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
@@ -266,11 +287,18 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+                writer.add_scalar("train/reward", data.rewards.mean(), global_step)
+
+        if args.save_model and args.save_model_incr and global_step - last_checkpoint_step >= args.save_model_incr:
+            model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model_step_{global_step}"
+            torch.save((actor.state_dict(), qf1.state_dict(), qf2.state_dict()), model_path)
+            last_checkpoint_step = global_step
+            print(f"model checkpoint saved to {model_path}")
+
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save((actor.state_dict(), qf1.state_dict(), qf2.state_dict()), model_path)
         print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.td3_eval import evaluate
 
         episodic_returns = evaluate(
             model_path,
@@ -286,7 +314,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
         if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
 
             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
             repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
